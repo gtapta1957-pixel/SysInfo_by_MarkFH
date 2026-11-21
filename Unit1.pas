@@ -4,33 +4,56 @@ interface
 
 uses
   Windows, Messages, SysUtils, Classes, Graphics, Controls, Forms, Dialogs,
-  StdCtrls, Registry, Clipbrd;
+  StdCtrls, ComCtrls, ExtCtrls, CommCtrl, Registry, Clipbrd;
 
 type
   TForm1 = class(TForm)
-    Memo1: TMemo;
+    PanelTop: TPanel;
+    LblTitle: TLabel;
+    LblSubtitle: TLabel;
+    PanelAccent: TPanel;
+    PageControl1: TPageControl;
+    TabOverview: TTabSheet;
+    TabWindows: TTabSheet;
+    TabProcessor: TTabSheet;
+    TabMemory: TTabSheet;
+    TabVideo: TTabSheet;
+    TabDisks: TTabSheet;
+    lvOverview: TListView;
+    lvWindows: TListView;
+    lvProcessor: TListView;
+    lvMemory: TListView;
+    lvVideo: TListView;
+    lvDisks: TListView;
     Button1: TButton;
     Button2: TButton;
     Button3: TButton;
+    StatusBar1: TStatusBar;
     procedure FormCreate(Sender: TObject);
     procedure Button1Click(Sender: TObject);
     procedure Button2Click(Sender: TObject);
     procedure Button3Click(Sender: TObject);
+    procedure StandardListCustomDrawItem(Sender: TCustomListView;
+      Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
+    procedure StandardListCustomDrawSubItem(Sender: TCustomListView;
+      Item: TListItem; SubItem: Integer; State: TCustomDrawState;
+      var DefaultDraw: Boolean);
+    procedure lvDisksAdvancedCustomDrawItem(Sender: TCustomListView;
+      Item: TListItem; State: TCustomDrawState; Stage: TCustomDrawStage;
+      var DefaultDraw: Boolean);
+    procedure lvDisksAdvancedCustomDrawSubItem(Sender: TCustomListView;
+      Item: TListItem; SubItem: Integer; State: TCustomDrawState;
+      Stage: TCustomDrawStage; var DefaultDraw: Boolean);
   private
-    procedure CollectSystemInfo;
-    function GetOSInfo: string;
-    function GetSystemExtraInfo: string;
-    function GetMoboBiosInfo: string;
+    FReportLines: TStringList;
+    procedure AddRow(LV: TListView; const PropName, PropVal: string);
+    procedure CollectAllData;
     function GetCPUBrandStringFromCPUID: string;
     function GetCPUFallbackNameBySignature(const Vendor: string; Family, Model, Stepping, BrandID: Cardinal): string;
-    function GetCPUInfo: string;
     function GetCPUFeatures: string;
     function MeasureCPUSpeedRDTSC: Cardinal;
-    function GetMemoryInfo: string;
-    function GetVideoInfo: string;
-    function GetScreenInfo: string;
-    function GetDrivesInfo: string;
   public
+    destructor Destroy; override;
   end;
 
 var
@@ -73,6 +96,18 @@ type
     var lpFreeBytesAvailableToCaller, lpTotalNumberOfBytes,
     lpTotalNumberOfFreeBytes: Int64): BOOL; stdcall;
   TIsWow64Process = function(hProcess: THandle; var Wow64Process: BOOL): BOOL; stdcall;
+  TGetProductInfo = function(dwOSMajorVersion, dwOSMinorVersion, dwSpMajorVersion,
+    dwSpMinorVersion: DWORD; var pdwReturnedProductType: DWORD): BOOL; stdcall;
+
+  TSystemLogicalProcessorInformation = record
+    ProcessorMask: DWORD;
+    Relationship: Integer;
+    Reserved: array[0..1] of Int64;
+  end;
+  PSystemLogicalProcessorInformation = ^TSystemLogicalProcessorInformation;
+
+  TGetLogicalProcessorInformation = function(Buffer: PSystemLogicalProcessorInformation;
+    var ReturnLength: DWORD): BOOL; stdcall;
 
 function SafeReadRegString(Root: HKEY; const Key, Name: string): string;
 var
@@ -168,8 +203,182 @@ begin
   rEDX := tEDX;
 end;
 
-{ Direct hardware Brand String extraction from CPUID (0x80000002..0x80000004) }
-{ Works in Windows 95/98 even when OS reports only "GenuineIntel" }
+function GetPhysicalCoresCount(LogicalCount: Integer): Integer;
+var
+  hKernel: THandle;
+  GetLPI: TGetLogicalProcessorInformation;
+  Buf: array of Byte;
+  ReturnLen, Offset: DWORD;
+  Info: PSystemLogicalProcessorInformation;
+  Cores: Integer;
+begin
+  Result := LogicalCount;
+  hKernel := GetModuleHandle('kernel32.dll');
+  if hKernel = 0 then Exit;
+
+  @GetLPI := GetProcAddress(hKernel, 'GetLogicalProcessorInformation');
+  if not Assigned(GetLPI) then Exit;
+
+  ReturnLen := 0;
+  GetLPI(nil, ReturnLen);
+  if (GetLastError <> ERROR_INSUFFICIENT_BUFFER) or (ReturnLen = 0) then Exit;
+
+  SetLength(Buf, ReturnLen);
+  if GetLPI(@Buf[0], ReturnLen) then
+  begin
+    Cores := 0;
+    Offset := 0;
+    while Offset + SizeOf(TSystemLogicalProcessorInformation) <= ReturnLen do
+    begin
+      Info := PSystemLogicalProcessorInformation(@Buf[Offset]);
+      if Info^.Relationship = 0 then
+        Inc(Cores);
+      Inc(Offset, SizeOf(TSystemLogicalProcessorInformation));
+    end;
+    if Cores > 0 then
+      Result := Cores;
+  end;
+end;
+
+procedure TForm1.AddRow(LV: TListView; const PropName, PropVal: string);
+var
+  Item: TListItem;
+begin
+  Item := LV.Items.Add;
+  Item.Caption := PropName;
+  Item.SubItems.Add(PropVal);
+end;
+
+procedure TForm1.StandardListCustomDrawItem(Sender: TCustomListView;
+  Item: TListItem; State: TCustomDrawState; var DefaultDraw: Boolean);
+begin
+  Sender.Canvas.Font.Name := 'MS Sans Serif';
+  Sender.Canvas.Font.Size := 8;
+  Sender.Canvas.Font.Style := [];
+  if not (cdsSelected in State) then
+  begin
+    Sender.Canvas.Font.Color := clBlack;
+    if Odd(Item.Index) then
+      Sender.Canvas.Brush.Color := $00F9F5F0
+    else
+      Sender.Canvas.Brush.Color := clWhite;
+  end;
+  DefaultDraw := True;
+end;
+
+procedure TForm1.StandardListCustomDrawSubItem(Sender: TCustomListView;
+  Item: TListItem; SubItem: Integer; State: TCustomDrawState;
+  var DefaultDraw: Boolean);
+begin
+  Sender.Canvas.Font.Name := 'MS Sans Serif';
+  Sender.Canvas.Font.Size := 8;
+  Sender.Canvas.Font.Style := [];
+  if not (cdsSelected in State) then
+  begin
+    Sender.Canvas.Font.Color := clBlack;
+    if Odd(Item.Index) then
+      Sender.Canvas.Brush.Color := $00F9F5F0
+    else
+      Sender.Canvas.Brush.Color := clWhite;
+  end;
+  DefaultDraw := True;
+end;
+
+procedure TForm1.lvDisksAdvancedCustomDrawItem(Sender: TCustomListView;
+  Item: TListItem; State: TCustomDrawState; Stage: TCustomDrawStage;
+  var DefaultDraw: Boolean);
+begin
+  Sender.Canvas.Font.Name := 'MS Sans Serif';
+  Sender.Canvas.Font.Size := 8;
+  Sender.Canvas.Font.Style := [];
+  if not (cdsSelected in State) then
+  begin
+    Sender.Canvas.Font.Color := clBlack;
+    if Odd(Item.Index) then
+      Sender.Canvas.Brush.Color := $00F9F5F0
+    else
+      Sender.Canvas.Brush.Color := clWhite;
+  end;
+  DefaultDraw := True;
+end;
+
+procedure TForm1.lvDisksAdvancedCustomDrawSubItem(Sender: TCustomListView;
+  Item: TListItem; SubItem: Integer; State: TCustomDrawState;
+  Stage: TCustomDrawStage; var DefaultDraw: Boolean);
+var
+  R, BarRect, FillRectBox: TRect;
+  Pct, FillW: Integer;
+  PctText: string;
+begin
+  Sender.Canvas.Font.Name := 'MS Sans Serif';
+  Sender.Canvas.Font.Size := 8;
+  Sender.Canvas.Font.Style := [];
+
+  if SubItem <> 5 then
+  begin
+    if not (cdsSelected in State) then
+    begin
+      Sender.Canvas.Font.Color := clBlack;
+      if Odd(Item.Index) then
+        Sender.Canvas.Brush.Color := $00F9F5F0
+      else
+        Sender.Canvas.Brush.Color := clWhite;
+    end;
+    DefaultDraw := True;
+    Exit;
+  end;
+
+  if Stage = cdPrePaint then
+  begin
+    ListView_GetSubItemRect(Sender.Handle, Item.Index, SubItem, LVIR_BOUNDS, @R);
+
+    if cdsSelected in State then
+      Sender.Canvas.Brush.Color := clHighlight
+    else if Odd(Item.Index) then
+      Sender.Canvas.Brush.Color := $00F9F5F0
+    else
+      Sender.Canvas.Brush.Color := clWhite;
+    Sender.Canvas.FillRect(R);
+
+    BarRect := R;
+    InflateRect(BarRect, -4, -2);
+
+    Sender.Canvas.Brush.Color := $00E6E6E6;
+    Sender.Canvas.Pen.Color := $00999999;
+    Sender.Canvas.Rectangle(BarRect.Left, BarRect.Top, BarRect.Right, BarRect.Bottom);
+
+    Pct := Integer(Item.Data);
+    if Pct >= 0 then
+    begin
+      if Pct > 100 then Pct := 100;
+      FillW := Round(((BarRect.Right - BarRect.Left - 2) * Pct) / 100);
+      if FillW > 0 then
+      begin
+        FillRectBox := Rect(BarRect.Left + 1, BarRect.Top + 1,
+          BarRect.Left + 1 + FillW, BarRect.Bottom - 1);
+        if Pct > 90 then
+          Sender.Canvas.Brush.Color := $002828E0 // Red (> 90%)
+        else
+          Sender.Canvas.Brush.Color := $00D6781A; // Blue (<= 90%)
+        Sender.Canvas.FillRect(FillRectBox);
+      end;
+      PctText := IntToStr(Pct) + '%';
+    end
+    else
+      PctText := 'N/A';
+
+    SetBkMode(Sender.Canvas.Handle, TRANSPARENT);
+    Sender.Canvas.Font.Name := 'MS Sans Serif';
+    Sender.Canvas.Font.Size := 8;
+    Sender.Canvas.Font.Style := [];
+    Sender.Canvas.Font.Color := clBlack;
+    DrawText(Sender.Canvas.Handle, PChar(PctText), Length(PctText), BarRect,
+      DT_CENTER or DT_VCENTER or DT_SINGLELINE);
+
+    DefaultDraw := False;
+  end;
+end;
+
 function TForm1.GetCPUBrandStringFromCPUID: string;
 var
   MaxExt, rEAX, rEBX, rECX, rEDX: DWORD;
@@ -195,7 +404,7 @@ begin
         Move(rEDX, Buf[Offset + 12], 4);
         Inc(Offset, 16);
       end;
-      Result := Trim(string(Buf));
+      Result := Trim(string(PAnsiChar(@Buf[0])));
       while Pos('  ', Result) > 0 do
         Result := StringReplace(Result, '  ', ' ', [rfReplaceAll]);
     end;
@@ -204,7 +413,6 @@ begin
   end;
 end;
 
-{ Built-in database for legacy CPUs (Pentium I/II/III, K6, Athlon XP, etc.) without Brand String }
 function TForm1.GetCPUFallbackNameBySignature(const Vendor: string;
   Family, Model, Stepping, BrandID: Cardinal): string;
 begin
@@ -281,188 +489,6 @@ begin
     Result := 'Cyrix 6x86 / MII';
 end;
 
-function TForm1.GetOSInfo: string;
-var
-  OSVI: TOSVersionInfoA;
-  hNtDll: THandle;
-  RtlGetVersion: TRtlGetVersion;
-  ProductName, EditionID, DisplayVer, BuildStr, CSD: string;
-  Major, Minor, Build: DWORD;
-begin
-  FillChar(OSVI, SizeOf(OSVI), 0);
-  OSVI.dwOSVersionInfoSize := SizeOf(OSVI);
-
-  hNtDll := GetModuleHandle('ntdll.dll');
-  if hNtDll <> 0 then
-  begin
-    @RtlGetVersion := GetProcAddress(hNtDll, 'RtlGetVersion');
-    if Assigned(RtlGetVersion) then
-      RtlGetVersion(OSVI)
-    else
-      GetVersionExA(OSVI);
-  end
-  else
-    GetVersionExA(OSVI);
-
-  Major := OSVI.dwMajorVersion;
-  Minor := OSVI.dwMinorVersion;
-  Build := OSVI.dwBuildNumber;
-  CSD := Trim(string(OSVI.szCSDVersion));
-
-  if OSVI.dwPlatformId = VER_PLATFORM_WIN32_WINDOWS then
-  begin
-    Build := Build and $FFFF;
-    if (Major = 4) and (Minor = 0) then
-    begin
-      if Build >= 1111 then
-        ProductName := 'Microsoft Windows 95 OSR2'
-      else
-        ProductName := 'Microsoft Windows 95';
-    end
-    else if (Major = 4) and (Minor = 10) then
-    begin
-      if Build >= 2222 then
-        ProductName := 'Microsoft Windows 98 Second Edition (SE)'
-      else
-        ProductName := 'Microsoft Windows 98';
-    end
-    else if (Major = 4) and (Minor = 90) then
-      ProductName := 'Microsoft Windows Millennium Edition (ME)'
-    else
-      ProductName := 'Microsoft Windows 9x';
-  end
-  else
-  begin
-    ProductName := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ProductName');
-    EditionID := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'EditionID');
-
-    // Fix registry mismatch when Windows 10/11 was upgraded/activated from Enterprise to Pro
-    if SameText(EditionID, 'Professional') and (Pos('Enterprise', ProductName) > 0) then
-      ProductName := StringReplace(ProductName, 'Enterprise', 'Pro', [rfIgnoreCase])
-    else if SameText(EditionID, 'Core') and (Pos('Enterprise', ProductName) > 0) then
-      ProductName := StringReplace(ProductName, 'Enterprise', 'Home', [rfIgnoreCase]);
-
-    if Build < 22000 then
-      Build := StrToIntDef(SafeReadRegString(HKEY_LOCAL_MACHINE,
-        'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'CurrentBuild'), Build);
-
-    if (Major = 10) and (Build >= 22000) then
-      ProductName := StringReplace(ProductName, 'Windows 10', 'Windows 11', [rfIgnoreCase]);
-
-    DisplayVer := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion');
-    if DisplayVer = '' then
-      DisplayVer := SafeReadRegString(HKEY_LOCAL_MACHINE,
-        'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId');
-
-    if DisplayVer <> '' then
-      ProductName := ProductName + ' (' + DisplayVer + ')';
-
-    if ProductName = '' then
-      ProductName := Format('Windows NT %d.%d', [Major, Minor]);
-  end;
-
-  BuildStr := Format('Version %d.%d (Build %d)', [Major, Minor, Build]);
-  if CSD <> '' then
-    BuildStr := BuildStr + ' [' + CSD + ']';
-
-  Result := ProductName + #13#10 + '   ' + BuildStr;
-end;
-
-function TForm1.GetSystemExtraInfo: string;
-var
-  CompName, UserName: array[0..255] of AnsiChar;
-  WinDir, SysDir, TempDir: array[0..MAX_PATH] of AnsiChar;
-  Size: DWORD;
-  hKernel: THandle;
-  GetTickCount64: TGetTickCount64;
-  IsWow64Process: TIsWow64Process;
-  IsWow64: BOOL;
-  UptimeMs: Int64;
-  Days, Hours, Mins, Secs: Int64;
-  ArchStr: string;
-begin
-  Size := SizeOf(CompName);
-  if not GetComputerNameA(CompName, Size) then StrPCopy(CompName, 'Unknown');
-
-  Size := SizeOf(UserName);
-  if not GetUserNameA(UserName, Size) then StrPCopy(UserName, 'Unknown');
-
-  GetWindowsDirectoryA(WinDir, MAX_PATH);
-  GetSystemDirectoryA(SysDir, MAX_PATH);
-  GetTempPathA(MAX_PATH, TempDir);
-
-  hKernel := GetModuleHandle('kernel32.dll');
-  IsWow64 := False;
-  @IsWow64Process := GetProcAddress(hKernel, 'IsWow64Process');
-  if Assigned(IsWow64Process) then
-    IsWow64Process(GetCurrentProcess, IsWow64);
-
-  if IsWow64 then
-    ArchStr := '64-bit OS (x64)'
-  else
-    ArchStr := '32-bit OS (x86)';
-
-  @GetTickCount64 := GetProcAddress(hKernel, 'GetTickCount64');
-  if Assigned(GetTickCount64) then
-    UptimeMs := GetTickCount64
-  else
-    UptimeMs := DWORD(GetTickCount);
-
-  Secs := UptimeMs div 1000;
-  Days := Secs div 86400;
-  Hours := (Secs mod 86400) div 3600;
-  Mins := (Secs mod 3600) div 60;
-  Secs := Secs mod 60;
-
-  Result := Format('OS Architecture : %s', [ArchStr]) + #13#10 +
-            Format('   Computer / User : %s / %s', [string(CompName), string(UserName)]) + #13#10 +
-            Format('   System Uptime   : %d d, %d h, %d m, %d s', [Days, Hours, Mins, Secs]) + #13#10 +
-            Format('   Windows Folder  : %s', [string(WinDir)]) + #13#10 +
-            Format('   System Folder   : %s', [string(SysDir)]);
-end;
-
-function TForm1.GetMoboBiosInfo: string;
-var
-  MoboManuf, MoboProd, BiosVendor, BiosVer, BiosDate: string;
-begin
-  MoboManuf := SafeReadRegString(HKEY_LOCAL_MACHINE,
-    'HARDWARE\DESCRIPTION\System\BIOS', 'BaseBoardManufacturer');
-  MoboProd := SafeReadRegString(HKEY_LOCAL_MACHINE,
-    'HARDWARE\DESCRIPTION\System\BIOS', 'BaseBoardProduct');
-  BiosVendor := SafeReadRegString(HKEY_LOCAL_MACHINE,
-    'HARDWARE\DESCRIPTION\System\BIOS', 'BIOSVendor');
-  BiosVer := SafeReadRegString(HKEY_LOCAL_MACHINE,
-    'HARDWARE\DESCRIPTION\System\BIOS', 'BIOSVersion');
-  BiosDate := SafeReadRegString(HKEY_LOCAL_MACHINE,
-    'HARDWARE\DESCRIPTION\System\BIOS', 'BIOSReleaseDate');
-
-  if BiosVer = '' then
-    BiosVer := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'HARDWARE\DESCRIPTION\System', 'SystemBiosVersion');
-  if BiosDate = '' then
-    BiosDate := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'HARDWARE\DESCRIPTION\System', 'SystemBiosDate');
-
-  if MoboManuf = '' then
-    MoboManuf := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'Enum\Root\*PNP0C01 0', 'BIOSName');
-
-  Result := '';
-  if (MoboManuf <> '') or (MoboProd <> '') then
-    Result := Format('Motherboard     : %s %s', [Trim(MoboManuf), Trim(MoboProd)]) + #13#10 + '   ';
-
-  if (BiosVendor <> '') or (BiosVer <> '') then
-    Result := Result + Format('BIOS Version    : %s %s', [Trim(BiosVendor), Trim(BiosVer)])
-  else
-    Result := Result + 'BIOS Version    : Standard / Legacy BIOS';
-
-  if BiosDate <> '' then
-    Result := Result + Format(' (Date: %s)', [BiosDate]);
-end;
-
 function TForm1.MeasureCPUSpeedRDTSC: Cardinal;
 var
   StartLow, StartHigh, EndLow, EndHigh: DWORD;
@@ -475,7 +501,7 @@ begin
 
   try
     ExecuteCPUID(1, rEAX, rEBX, rECX, rEDX);
-    if (rEDX and $10) = 0 then Exit; // RDTSC not supported
+    if (rEDX and $10) = 0 then Exit;
 
     StartTicks := GetTickCount;
     while GetTickCount = StartTicks do;
@@ -538,386 +564,575 @@ begin
   end;
 end;
 
-function TForm1.GetCPUInfo: string;
+procedure TForm1.CollectAllData;
 var
+  OSVI: TOSVersionInfoA;
+  hNtDll, hKernel, hUser32: THandle;
+  RtlGetVersion: TRtlGetVersion;
+  GetProductInfo: TGetProductInfo;
+  GetTickCount64: TGetTickCount64;
+  IsWow64Process: TIsWow64Process;
+  GlobalMemoryStatusEx: TGlobalMemoryStatusEx;
+  EnumDisplayDevicesA: TEnumDisplayDevicesA;
+  GetDiskFreeSpaceExA: TGetDiskFreeSpaceExA;
+
+  ProductName, EditionID, DisplayVer, BuildStr, CSD, ArchStr, UptimeStr: string;
+  Major, Minor, Build, ProdType: DWORD;
+  CompName, UserName: array[0..255] of AnsiChar;
+  WinDir, SysDir: array[0..MAX_PATH] of AnsiChar;
+  Size: DWORD;
+  IsWow64: BOOL;
+  UptimeMs, Days, Hours, Mins, Secs: Int64;
+
+  MoboManuf, MoboProd, BiosVendor, BiosVer, BiosDate, MoboStr, BiosStr: string;
+
   SysInfo: TSystemInfo;
-  CPUName, Vendor, SigStr: string;
-  VendorBuf: array[0..12] of AnsiChar;
+  CPUName, Vendor, SigStr, ClockStr, FeatStr: string;
   rEAX, rEBX, rECX, rEDX: DWORD;
   Family, Model, Stepping, ExtFamily, ExtModel, BrandID: Cardinal;
-  MHz: Integer;
-begin
-  GetSystemInfo(SysInfo);
-  Vendor := '';
-  SigStr := '';
-  Family := 0; Model := 0; Stepping := 0; BrandID := 0;
+  MHz, PhysCores: Integer;
 
-  // 1. Read Vendor and Family/Model/Stepping directly from CPUID Leaf 0 and 1
-  if IsCPUIDSupported then
-  begin
-    try
-      ExecuteCPUID(0, rEAX, rEBX, rECX, rEDX);
-      FillChar(VendorBuf, SizeOf(VendorBuf), 0);
-      Move(rEBX, VendorBuf[0], 4);
-      Move(rEDX, VendorBuf[4], 4);
-      Move(rECX, VendorBuf[8], 4);
-      Vendor := Trim(string(VendorBuf));
-
-      if rEAX >= 1 then
-      begin
-        ExecuteCPUID(1, rEAX, rEBX, rECX, rEDX);
-        Stepping := rEAX and $0F;
-        Model := (rEAX shr 4) and $0F;
-        Family := (rEAX shr 8) and $0F;
-        ExtModel := (rEAX shr 16) and $0F;
-        ExtFamily := (rEAX shr 20) and $FF;
-        BrandID := rEBX and $FF;
-
-        if Family = 15 then
-          Family := Family + ExtFamily;
-        if (Family = 6) or (Family = 15) then
-          Model := (ExtModel shl 4) + Model;
-
-        SigStr := Format('Family %d (0x%X), Model %d (0x%X), Stepping %d',
-          [Family, Family, Model, Model, Stepping]);
-      end;
-    except
-    end;
-  end;
-
-  // 2. Primary source: Hardware CPUID Brand String (works on Xeon X5670 even in Windows 98!)
-  CPUName := GetCPUBrandStringFromCPUID;
-
-  // 3. Secondary source: Windows Registry (for NT/XP/10/11)
-  if CPUName = '' then
-    CPUName := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'HARDWARE\DESCRIPTION\System\CentralProcessor ', 'ProcessorNameString');
-
-  // 4. Tertiary source: Built-in CPUID signature database (for Pentium I/II/III, K6, Athlon XP)
-  if (CPUName = '') and (Family > 0) then
-    CPUName := GetCPUFallbackNameBySignature(Vendor, Family, Model, Stepping, BrandID);
-
-  // 5. Fallback to Registry Identifier or TSystemInfo
-  if CPUName = '' then
-    CPUName := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'HARDWARE\DESCRIPTION\System\CentralProcessor ', 'Identifier');
-
-  if CPUName = '' then
-    CPUName := Format('x86 Processor (Level %d, Revision %d)',
-      [SysInfo.wProcessorLevel, SysInfo.wProcessorRevision]);
-
-  if Vendor = '' then
-    Vendor := SafeReadRegString(HKEY_LOCAL_MACHINE,
-      'HARDWARE\DESCRIPTION\System\CentralProcessor ', 'VendorIdentifier');
-
-  while Pos('  ', CPUName) > 0 do
-    CPUName := StringReplace(CPUName, '  ', ' ', [rfReplaceAll]);
-
-  MHz := SafeReadRegInteger(HKEY_LOCAL_MACHINE,
-    'HARDWARE\DESCRIPTION\System\CentralProcessor ', '~MHz');
-
-  if MHz <= 0 then
-    MHz := MeasureCPUSpeedRDTSC;
-
-  Result := 'Model           : ' + CPUName;
-  if Vendor <> '' then
-    Result := Result + ' [' + Vendor + ']';
-
-  if SigStr <> '' then
-    Result := Result + #13#10 + '   CPUID Signature : ' + SigStr;
-
-  if MHz > 0 then
-    Result := Result + #13#10 + Format('   Clock & Cores   : ~%d MHz | Logical Cores: %d',
-      [MHz, SysInfo.dwNumberOfProcessors])
-  else
-    Result := Result + #13#10 + Format('   Clock & Cores   : Unknown MHz | Logical Cores: %d',
-      [SysInfo.dwNumberOfProcessors]);
-
-  Result := Result + #13#10 + '   Instructions    : ' + GetCPUFeatures;
-end;
-
-function TForm1.GetMemoryInfo: string;
-var
-  hKernel: THandle;
-  GlobalMemoryStatusEx: TGlobalMemoryStatusEx;
   MemEx: TMemoryStatusEx;
   MemOld: TMemoryStatus;
-  TotalPhysMB, AvailPhysMB, TotalPageMB, AvailPageMB: Int64;
+  TotalPhysMB, AvailPhysMB, UsedPhysMB, TotalPageMB, AvailPageMB, TotalVirtMB: Int64;
   LoadPct: DWORD;
-begin
-  TotalPhysMB := 0; AvailPhysMB := 0;
-  TotalPageMB := 0; AvailPageMB := 0;
-  LoadPct := 0;
-
-  hKernel := GetModuleHandle('kernel32.dll');
-  @GlobalMemoryStatusEx := GetProcAddress(hKernel, 'GlobalMemoryStatusEx');
-
-  if Assigned(GlobalMemoryStatusEx) then
-  begin
-    FillChar(MemEx, SizeOf(MemEx), 0);
-    MemEx.dwLength := SizeOf(MemEx);
-    if GlobalMemoryStatusEx(MemEx) then
-    begin
-      TotalPhysMB := MemEx.ullTotalPhys div (1024 * 1024);
-      AvailPhysMB := MemEx.ullAvailPhys div (1024 * 1024);
-      TotalPageMB := MemEx.ullTotalPageFile div (1024 * 1024);
-      AvailPageMB := MemEx.ullAvailPageFile div (1024 * 1024);
-      LoadPct := MemEx.dwMemoryLoad;
-    end;
-  end;
-
-  if TotalPhysMB = 0 then
-  begin
-    FillChar(MemOld, SizeOf(MemOld), 0);
-    MemOld.dwLength := SizeOf(MemOld);
-    GlobalMemoryStatus(MemOld);
-    TotalPhysMB := Int64(MemOld.dwTotalPhys) div (1024 * 1024);
-    AvailPhysMB := Int64(MemOld.dwAvailPhys) div (1024 * 1024);
-    TotalPageMB := Int64(MemOld.dwTotalPageFile) div (1024 * 1024);
-    AvailPageMB := Int64(MemOld.dwAvailPageFile) div (1024 * 1024);
-    LoadPct := MemOld.dwMemoryLoad;
-  end;
-
-  Result := Format('Physical RAM    : %d MB Total | %d MB Free (%d%% Load)',
-    [TotalPhysMB, AvailPhysMB, LoadPct]) + #13#10 +
-            Format('   Page / Commit   : %d MB Total | %d MB Free',
-    [TotalPageMB, AvailPageMB]);
-end;
-
-function TForm1.GetVideoInfo: string;
-var
-  hUser32: THandle;
-  EnumDisplayDevicesA: TEnumDisplayDevicesA;
+  MemSummaryStr, GPUStr, ScreenStr: string;
   DispDev: TDisplayDeviceA;
   i: DWORD;
-  VideoList: TStringList;
+  VideoList, SubKeys: TStringList;
   Reg: TRegistry;
-  SubKeys: TStringList;
   j: Integer;
   CardDesc: string;
-begin
-  VideoList := TStringList.Create;
-  try
-    hUser32 := GetModuleHandle('user32.dll');
-    @EnumDisplayDevicesA := GetProcAddress(hUser32, 'EnumDisplayDevicesA');
-
-    if Assigned(EnumDisplayDevicesA) then
-    begin
-      i := 0;
-      FillChar(DispDev, SizeOf(DispDev), 0);
-      DispDev.cb := SizeOf(DispDev);
-
-      while EnumDisplayDevicesA(nil, i, DispDev, 0) do
-      begin
-        if (DispDev.StateFlags and $00000008) = 0 then
-        begin
-          CardDesc := Trim(string(DispDev.DeviceString));
-          if (CardDesc <> '') and (VideoList.IndexOf(CardDesc) = -1) then
-            VideoList.Add(CardDesc);
-        end;
-        Inc(i);
-        FillChar(DispDev, SizeOf(DispDev), 0);
-        DispDev.cb := SizeOf(DispDev);
-      end;
-    end;
-
-    // Fallback for Windows 95
-    if VideoList.Count = 0 then
-    begin
-      Reg := TRegistry.Create;
-      SubKeys := TStringList.Create;
-      try
-        Reg.RootKey := HKEY_LOCAL_MACHINE;
-        if Reg.OpenKeyReadOnly('System\CurrentControlSet\Services\Class\Display') then
-        begin
-          Reg.GetKeyNames(SubKeys);
-          Reg.CloseKey;
-          for j := 0 to SubKeys.Count - 1 do
-          begin
-            CardDesc := SafeReadRegString(HKEY_LOCAL_MACHINE,
-              'System\CurrentControlSet\Services\Class\Display' + SubKeys[j], 'DriverDesc');
-            if (CardDesc <> '') and (VideoList.IndexOf(CardDesc) = -1) then
-              VideoList.Add(CardDesc);
-          end;
-        end;
-      except
-      end;
-      SubKeys.Free;
-      Reg.Free;
-    end;
-
-    if VideoList.Count > 0 then
-      Result := Trim(VideoList.Text)
-    else
-      Result := 'Standard Display Adapter (Unknown Model)';
-  finally
-    VideoList.Free;
-  end;
-end;
-
-function TForm1.GetScreenInfo: string;
-var
   DC: HDC;
   WidthPx, HeightPx, BPP, Planes, RefreshRate: Integer;
-begin
-  DC := GetDC(0);
-  try
-    WidthPx := GetDeviceCaps(DC, HORZRES);
-    HeightPx := GetDeviceCaps(DC, VERTRES);
-    Planes := GetDeviceCaps(DC, PLANES);
-    if Planes < 1 then
-      Planes := 1;
-    BPP := GetDeviceCaps(DC, BITSPIXEL) * Planes;
-    RefreshRate := GetDeviceCaps(DC, VREFRESH);
-  finally
-    ReleaseDC(0, DC);
-  end;
 
-  if RefreshRate > 1 then
-    Result := Format('%d x %d pixels, %d bit (%d Hz)', [WidthPx, HeightPx, BPP, RefreshRate])
-  else
-    Result := Format('%d x %d pixels, %d bit', [WidthPx, HeightPx, BPP]);
-end;
-
-function TForm1.GetDrivesInfo: string;
-var
   DrivesMask: DWORD;
   DriveLetter: Char;
-  RootPath, TypeStr, VolLabel, FSName: string;
+  RootPath, TypeStr, VolLabel, FSName, CapStr: string;
   DType: UINT;
   VolNameBuf, FSNameBuf: array[0..255] of AnsiChar;
   SerialNum, MaxCompLen, FSFlags: DWORD;
-  hKernel: THandle;
-  GetDiskFreeSpaceExA: TGetDiskFreeSpaceExA;
   FreeAvail, TotalBytes, TotalFree: Int64;
   SecPerClus, BytesPerSec, FreeClus, TotalClus: DWORD;
-  Lines: TStringList;
   OldErrMode: UINT;
+  Item: TListItem;
+  UsedPct: Integer;
 begin
-  Lines := TStringList.Create;
-  OldErrMode := SetErrorMode(SEM_FAILCRITICALERRORS);
+  lvOverview.Items.BeginUpdate;
+  lvWindows.Items.BeginUpdate;
+  lvProcessor.Items.BeginUpdate;
+  lvMemory.Items.BeginUpdate;
+  lvVideo.Items.BeginUpdate;
+  lvDisks.Items.BeginUpdate;
   try
+    lvOverview.Items.Clear;
+    lvWindows.Items.Clear;
+    lvProcessor.Items.Clear;
+    lvMemory.Items.Clear;
+    lvVideo.Items.Clear;
+    lvDisks.Items.Clear;
+    FReportLines.Clear;
+
+    FReportLines.Add('===============================================================');
+    FReportLines.Add('   SysInfo by MarkFH v2.6  |  User-Mode Hardware Diagnostics');
+    FReportLines.Add('===============================================================');
+
     hKernel := GetModuleHandle('kernel32.dll');
-    @GetDiskFreeSpaceExA := GetProcAddress(hKernel, 'GetDiskFreeSpaceExA');
+    hNtDll := GetModuleHandle('ntdll.dll');
+    hUser32 := GetModuleHandle('user32.dll');
 
-    DrivesMask := GetLogicalDrives;
-    for DriveLetter := 'A' to 'Z' do
+    // ---------------- 1. WINDOWS ----------------
+    FillChar(OSVI, SizeOf(OSVI), 0);
+    OSVI.dwOSVersionInfoSize := SizeOf(OSVI);
+    if hNtDll <> 0 then
     begin
-      if (DrivesMask and (1 shl (Ord(DriveLetter) - Ord('A')))) <> 0 then
+      @RtlGetVersion := GetProcAddress(hNtDll, 'RtlGetVersion');
+      if Assigned(RtlGetVersion) then
+        RtlGetVersion(OSVI)
+      else
+        GetVersionExA(OSVI);
+    end
+    else
+      GetVersionExA(OSVI);
+
+    Major := OSVI.dwMajorVersion;
+    Minor := OSVI.dwMinorVersion;
+    Build := OSVI.dwBuildNumber;
+    CSD := Trim(string(OSVI.szCSDVersion));
+
+    if OSVI.dwPlatformId = VER_PLATFORM_WIN32_WINDOWS then
+    begin
+      Build := Build and $FFFF;
+      if (Major = 4) and (Minor = 0) then
       begin
-        RootPath := DriveLetter + ':';
-        DType := GetDriveTypeA(PAnsiChar(RootPath));
-        case DType of
-          DRIVE_REMOVABLE: TypeStr := 'Removable';
-          DRIVE_FIXED:     TypeStr := 'Fixed HDD/SSD';
-          DRIVE_REMOTE:    TypeStr := 'Network';
-          DRIVE_CDROM:     TypeStr := 'CD/DVD-ROM';
-          DRIVE_RAMDISK:   TypeStr := 'RAM Disk';
-        else
-          TypeStr := 'Unknown';
+        if Build >= 1111 then ProductName := 'Microsoft Windows 95 OSR2'
+        else ProductName := 'Microsoft Windows 95';
+      end
+      else if (Major = 4) and (Minor = 10) then
+      begin
+        if Build >= 2222 then ProductName := 'Microsoft Windows 98 Second Edition (SE)'
+        else ProductName := 'Microsoft Windows 98';
+      end
+      else if (Major = 4) and (Minor = 90) then
+        ProductName := 'Microsoft Windows Millennium Edition (ME)'
+      else
+        ProductName := 'Microsoft Windows 9x';
+    end
+    else
+    begin
+      ProductName := SafeReadRegString(HKEY_LOCAL_MACHINE,
+        'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ProductName');
+      EditionID := SafeReadRegString(HKEY_LOCAL_MACHINE,
+        'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'EditionID');
+
+      ProdType := 0;
+      @GetProductInfo := GetProcAddress(hKernel, 'GetProductInfo');
+      if Assigned(GetProductInfo) and GetProductInfo(Major, Minor, 0, 0, ProdType) then
+      begin
+        case ProdType of
+          $00000030, $00000031: EditionID := 'Professional';
+          $00000004, $0000001B: EditionID := 'Enterprise';
+          $00000065, $00000062: EditionID := 'Home';
+          $00000079:            EditionID := 'Education';
         end;
+      end;
 
-        FillChar(VolNameBuf, SizeOf(VolNameBuf), 0);
-        FillChar(FSNameBuf, SizeOf(FSNameBuf), 0);
-        VolLabel := '';
-        FSName := '';
+      if SameText(EditionID, 'Professional') and (Pos('Enterprise', ProductName) > 0) then
+        ProductName := StringReplace(ProductName, 'Enterprise', 'Pro', [rfIgnoreCase])
+      else if SameText(EditionID, 'Home') and (Pos('Enterprise', ProductName) > 0) then
+        ProductName := StringReplace(ProductName, 'Enterprise', 'Home', [rfIgnoreCase]);
 
-        if GetVolumeInformationA(PAnsiChar(RootPath), VolNameBuf, SizeOf(VolNameBuf),
-          @SerialNum, MaxCompLen, FSFlags, FSNameBuf, SizeOf(FSNameBuf)) then
+      if Build < 22000 then
+        Build := StrToIntDef(SafeReadRegString(HKEY_LOCAL_MACHINE,
+          'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'CurrentBuild'), Build);
+
+      if (Major = 10) and (Build >= 22000) then
+        ProductName := StringReplace(ProductName, 'Windows 10', 'Windows 11', [rfIgnoreCase]);
+
+      DisplayVer := SafeReadRegString(HKEY_LOCAL_MACHINE,
+        'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'DisplayVersion');
+      if DisplayVer = '' then
+        DisplayVer := SafeReadRegString(HKEY_LOCAL_MACHINE,
+          'SOFTWARE\Microsoft\Windows NT\CurrentVersion', 'ReleaseId');
+
+      if DisplayVer <> '' then
+        ProductName := ProductName + ' (' + DisplayVer + ')';
+
+      if ProductName = '' then
+        ProductName := Format('Windows NT %d.%d', [Major, Minor]);
+    end;
+
+    BuildStr := Format('%d.%d (Build %d)', [Major, Minor, Build]);
+    if CSD <> '' then
+      BuildStr := BuildStr + ' [' + CSD + ']';
+
+    IsWow64 := False;
+    @IsWow64Process := GetProcAddress(hKernel, 'IsWow64Process');
+    if Assigned(IsWow64Process) then
+      IsWow64Process(GetCurrentProcess, IsWow64);
+    if IsWow64 then ArchStr := '64-bit (x64)' else ArchStr := '32-bit (x86)';
+
+    Size := SizeOf(CompName);
+    if not GetComputerNameA(CompName, Size) then StrPCopy(CompName, 'Unknown');
+    Size := SizeOf(UserName);
+    if not GetUserNameA(UserName, Size) then StrPCopy(UserName, 'Unknown');
+
+    GetWindowsDirectoryA(WinDir, MAX_PATH);
+    GetSystemDirectoryA(SysDir, MAX_PATH);
+
+    @GetTickCount64 := GetProcAddress(hKernel, 'GetTickCount64');
+    if Assigned(GetTickCount64) then UptimeMs := GetTickCount64
+    else UptimeMs := DWORD(GetTickCount);
+
+    Secs := UptimeMs div 1000;
+    Days := Secs div 86400;
+    Hours := (Secs mod 86400) div 3600;
+    Mins := (Secs mod 3600) div 60;
+    Secs := Secs mod 60;
+    UptimeStr := Format('%d d, %d h, %d m, %d s', [Days, Hours, Mins, Secs]);
+
+    AddRow(lvWindows, 'Operating System', ProductName);
+    AddRow(lvWindows, 'Kernel Version', BuildStr);
+    AddRow(lvWindows, 'Architecture', ArchStr);
+    AddRow(lvWindows, 'Computer Name', string(CompName));
+    AddRow(lvWindows, 'Current User', string(UserName));
+    AddRow(lvWindows, 'System Uptime', UptimeStr);
+    AddRow(lvWindows, 'Windows Folder', string(WinDir));
+    AddRow(lvWindows, 'System Folder', string(SysDir));
+
+    // ---------------- 2. MOTHERBOARD & BIOS ----------------
+    MoboManuf := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\BIOS', 'BaseBoardManufacturer');
+    MoboProd := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\BIOS', 'BaseBoardProduct');
+    BiosVendor := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\BIOS', 'BIOSVendor');
+    BiosVer := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\BIOS', 'BIOSVersion');
+    BiosDate := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\BIOS', 'BIOSReleaseDate');
+
+    if BiosVer = '' then
+      BiosVer := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System', 'SystemBiosVersion');
+    if BiosDate = '' then
+      BiosDate := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System', 'SystemBiosDate');
+    if MoboManuf = '' then
+      MoboManuf := SafeReadRegString(HKEY_LOCAL_MACHINE, 'Enum\Root\*PNP0C01 0', 'BIOSName');
+
+    MoboStr := Trim(MoboManuf + ' ' + MoboProd);
+    if MoboStr = '' then MoboStr := 'Unknown / Legacy Motherboard';
+
+    BiosStr := Trim(BiosVendor + ' ' + BiosVer);
+    if BiosStr = '' then BiosStr := 'Standard / Legacy BIOS';
+    if BiosDate <> '' then BiosStr := BiosStr + ' (' + BiosDate + ')';
+
+    // ---------------- 3. PROCESSOR ----------------
+    GetSystemInfo(SysInfo);
+    Vendor := ''; SigStr := '';
+    Family := 0; Model := 0; Stepping := 0; BrandID := 0;
+
+    if IsCPUIDSupported then
+    begin
+      try
+        ExecuteCPUID(0, rEAX, rEBX, rECX, rEDX);
+        SetLength(Vendor, 12);
+        Move(rEBX, Vendor[1], 4);
+        Move(rEDX, Vendor[5], 4);
+        Move(rECX, Vendor[9], 4);
+        Vendor := Trim(Vendor);
+
+        if rEAX >= 1 then
         begin
-          VolLabel := Trim(string(VolNameBuf));
-          FSName := Trim(string(FSNameBuf));
+          ExecuteCPUID(1, rEAX, rEBX, rECX, rEDX);
+          Stepping := rEAX and $0F;
+          Model := (rEAX shr 4) and $0F;
+          Family := (rEAX shr 8) and $0F;
+          ExtModel := (rEAX shr 16) and $0F;
+          ExtFamily := (rEAX shr 20) and $FF;
+          BrandID := rEBX and $FF;
+
+          if Family = 15 then Family := Family + ExtFamily;
+          if (Family = 6) or (Family = 15) then Model := (ExtModel shl 4) + Model;
+
+          SigStr := Format('Family %d (0x%X), Model %d (0x%X), Stepping %d',
+            [Family, Family, Model, Model, Stepping]);
         end;
-
-        TotalBytes := 0;
-        TotalFree := 0;
-        if Assigned(GetDiskFreeSpaceExA) then
-        begin
-          if not GetDiskFreeSpaceExA(PAnsiChar(RootPath), FreeAvail, TotalBytes, TotalFree) then
-          begin
-            TotalBytes := 0;
-            TotalFree := 0;
-          end;
-        end
-        else
-        begin
-          if GetDiskFreeSpaceA(PAnsiChar(RootPath), SecPerClus, BytesPerSec, FreeClus, TotalClus) then
-          begin
-            TotalBytes := Int64(TotalClus) * SecPerClus * BytesPerSec;
-            TotalFree := Int64(FreeClus) * SecPerClus * BytesPerSec;
-          end;
-        end;
-
-        if VolLabel = '' then
-          VolLabel := 'No Label';
-        if FSName = '' then
-          FSName := 'N/A';
-
-        if TotalBytes > 0 then
-          Lines.Add(Format('%s [%s] (%s, %s) - Total: %d MB | Free: %d MB',
-            [RootPath, TypeStr, VolLabel, FSName,
-             TotalBytes div (1024 * 1024), TotalFree div (1024 * 1024)]))
-        else
-          Lines.Add(Format('%s [%s] (%s) - Media not ready / Empty',
-            [RootPath, TypeStr, VolLabel]));
+      except
       end;
     end;
 
-    if Lines.Count > 0 then
-      Result := Trim(Lines.Text)
-    else
-      Result := 'No logical drives detected';
-  finally
-    SetErrorMode(OldErrMode);
-    Lines.Free;
-  end;
-end;
+    CPUName := GetCPUBrandStringFromCPUID;
+    if CPUName = '' then
+      CPUName := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\CentralProcessor ', 'ProcessorNameString');
+    if (CPUName = '') and (Family > 0) then
+      CPUName := GetCPUFallbackNameBySignature(Vendor, Family, Model, Stepping, BrandID);
+    if CPUName = '' then
+      CPUName := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\CentralProcessor ', 'Identifier');
+    if CPUName = '' then
+      CPUName := Format('x86 Processor (Level %d, Rev %d)', [SysInfo.wProcessorLevel, SysInfo.wProcessorRevision]);
 
-procedure TForm1.CollectSystemInfo;
-begin
-  Memo1.Lines.BeginUpdate;
-  try
-    Memo1.Clear;
-    Memo1.Lines.Add('===============================================================');
-    Memo1.Lines.Add('   SysInfo by MarkFH v2.1  |  User-Mode Hardware Diagnostics');
-    Memo1.Lines.Add('===============================================================');
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('[OPERATING SYSTEM]');
-    Memo1.Lines.Add('   ' + GetOSInfo);
-    Memo1.Lines.Add('   ' + GetSystemExtraInfo);
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('[MOTHERBOARD & BIOS]');
-    Memo1.Lines.Add('   ' + GetMoboBiosInfo);
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('[PROCESSOR (CPU)]');
-    Memo1.Lines.Add('   ' + GetCPUInfo);
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('[MEMORY & PAGEFILE]');
-    Memo1.Lines.Add('   ' + GetMemoryInfo);
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('[VIDEO ADAPTER & DISPLAY]');
-    Memo1.Lines.Add('   Adapter         : ' + StringReplace(GetVideoInfo, #13#10, #13#10'                     ', [rfReplaceAll]));
-    Memo1.Lines.Add('   Current Mode    : ' + GetScreenInfo);
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('[STORAGE DRIVES]');
-    Memo1.Lines.Add('   ' + StringReplace(GetDrivesInfo, #13#10, #13#10'   ', [rfReplaceAll]));
-    Memo1.Lines.Add('');
-    Memo1.Lines.Add('===============================================================');
+    if Vendor = '' then
+      Vendor := SafeReadRegString(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\CentralProcessor ', 'VendorIdentifier');
+
+    while Pos('  ', CPUName) > 0 do
+      CPUName := StringReplace(CPUName, '  ', ' ', [rfReplaceAll]);
+
+    MHz := SafeReadRegInteger(HKEY_LOCAL_MACHINE, 'HARDWARE\DESCRIPTION\System\CentralProcessor ', '~MHz');
+    if MHz <= 0 then
+      MHz := MeasureCPUSpeedRDTSC;
+
+    PhysCores := GetPhysicalCoresCount(SysInfo.dwNumberOfProcessors);
+    if MHz > 0 then
+      ClockStr := Format('~%d MHz (%d Cores / %d Threads)', [MHz, PhysCores, SysInfo.dwNumberOfProcessors])
+    else
+      ClockStr := Format('Unknown MHz (%d Cores / %d Threads)', [PhysCores, SysInfo.dwNumberOfProcessors]);
+
+    FeatStr := GetCPUFeatures;
+
+    AddRow(lvProcessor, 'Processor Model', CPUName);
+    AddRow(lvProcessor, 'Vendor ID', Vendor);
+    AddRow(lvProcessor, 'CPUID Signature', SigStr);
+    AddRow(lvProcessor, 'Clock & Cores', ClockStr);
+    AddRow(lvProcessor, 'Instruction Sets', FeatStr);
+    AddRow(lvProcessor, 'Motherboard', MoboStr);
+    AddRow(lvProcessor, 'BIOS Version', BiosStr);
+
+    // ---------------- 4. MEMORY ----------------
+    TotalPhysMB := 0; AvailPhysMB := 0;
+    TotalPageMB := 0; AvailPageMB := 0; TotalVirtMB := 0; LoadPct := 0;
+
+    @GlobalMemoryStatusEx := GetProcAddress(hKernel, 'GlobalMemoryStatusEx');
+    if Assigned(GlobalMemoryStatusEx) then
+    begin
+      FillChar(MemEx, SizeOf(MemEx), 0);
+      MemEx.dwLength := SizeOf(MemEx);
+      if GlobalMemoryStatusEx(MemEx) then
+      begin
+        TotalPhysMB := MemEx.ullTotalPhys div (1024 * 1024);
+        AvailPhysMB := MemEx.ullAvailPhys div (1024 * 1024);
+        TotalPageMB := MemEx.ullTotalPageFile div (1024 * 1024);
+        AvailPageMB := MemEx.ullAvailPageFile div (1024 * 1024);
+        TotalVirtMB := MemEx.ullTotalVirtual div (1024 * 1024);
+        LoadPct := MemEx.dwMemoryLoad;
+      end;
+    end;
+
+    if TotalPhysMB = 0 then
+    begin
+      FillChar(MemOld, SizeOf(MemOld), 0);
+      MemOld.dwLength := SizeOf(MemOld);
+      GlobalMemoryStatus(MemOld);
+      TotalPhysMB := Int64(MemOld.dwTotalPhys) div (1024 * 1024);
+      AvailPhysMB := Int64(MemOld.dwAvailPhys) div (1024 * 1024);
+      TotalPageMB := Int64(MemOld.dwTotalPageFile) div (1024 * 1024);
+      AvailPageMB := Int64(MemOld.dwAvailPageFile) div (1024 * 1024);
+      TotalVirtMB := Int64(MemOld.dwTotalVirtual) div (1024 * 1024);
+      LoadPct := MemOld.dwMemoryLoad;
+    end;
+
+    UsedPhysMB := TotalPhysMB - AvailPhysMB;
+    if UsedPhysMB < 0 then UsedPhysMB := 0;
+
+    MemSummaryStr := Format('%d MB Total | %d MB Free (%d%% Load)', [TotalPhysMB, AvailPhysMB, LoadPct]);
+
+    AddRow(lvMemory, 'Total Physical RAM', Format('%d MB', [TotalPhysMB]));
+    AddRow(lvMemory, 'Used Physical RAM', Format('%d MB (%d%%)', [UsedPhysMB, LoadPct]));
+    AddRow(lvMemory, 'Free Physical RAM', Format('%d MB', [AvailPhysMB]));
+    AddRow(lvMemory, 'Page / Commit Total', Format('%d MB', [TotalPageMB]));
+    AddRow(lvMemory, 'Page / Commit Free', Format('%d MB', [AvailPageMB]));
+    AddRow(lvMemory, 'Virtual Address Space', Format('%d MB', [TotalVirtMB]));
+
+    // ---------------- 5. VIDEO ----------------
+    VideoList := TStringList.Create;
+    try
+      @EnumDisplayDevicesA := GetProcAddress(hUser32, 'EnumDisplayDevicesA');
+      if Assigned(EnumDisplayDevicesA) then
+      begin
+        i := 0;
+        FillChar(DispDev, SizeOf(DispDev), 0);
+        DispDev.cb := SizeOf(DispDev);
+        while EnumDisplayDevicesA(nil, i, DispDev, 0) do
+        begin
+          if (DispDev.StateFlags and $00000008) = 0 then
+          begin
+            CardDesc := Trim(string(DispDev.DeviceString));
+            if (CardDesc <> '') and (VideoList.IndexOf(CardDesc) = -1) then
+              VideoList.Add(CardDesc);
+          end;
+          Inc(i);
+          FillChar(DispDev, SizeOf(DispDev), 0);
+          DispDev.cb := SizeOf(DispDev);
+        end;
+      end;
+
+      if VideoList.Count = 0 then
+      begin
+        Reg := TRegistry.Create;
+        SubKeys := TStringList.Create;
+        try
+          Reg.RootKey := HKEY_LOCAL_MACHINE;
+          if Reg.OpenKeyReadOnly('System\CurrentControlSet\Services\Class\Display') then
+          begin
+            Reg.GetKeyNames(SubKeys);
+            Reg.CloseKey;
+            for j := 0 to SubKeys.Count - 1 do
+            begin
+              CardDesc := SafeReadRegString(HKEY_LOCAL_MACHINE,
+                'System\CurrentControlSet\Services\Class\Display' + SubKeys[j], 'DriverDesc');
+              if (CardDesc <> '') and (VideoList.IndexOf(CardDesc) = -1) then
+                VideoList.Add(CardDesc);
+            end;
+          end;
+        except
+        end;
+        SubKeys.Free;
+        Reg.Free;
+      end;
+
+      if VideoList.Count > 0 then
+        GPUStr := StringReplace(Trim(VideoList.Text), #13#10, ', ', [rfReplaceAll])
+      else
+        GPUStr := 'Standard Display Adapter';
+    finally
+      VideoList.Free;
+    end;
+
+    DC := GetDC(0);
+    try
+      WidthPx := GetDeviceCaps(DC, HORZRES);
+      HeightPx := GetDeviceCaps(DC, VERTRES);
+      BPP := GetDeviceCaps(DC, BITSPIXEL);
+      Planes := GetDeviceCaps(DC, PLANES);
+      if (BPP <= 8) and (Planes > 1) and (Planes <= 8) then
+        BPP := BPP * Planes;
+      RefreshRate := GetDeviceCaps(DC, VREFRESH);
+    finally
+      ReleaseDC(0, DC);
+    end;
+
+    if RefreshRate > 1 then
+      ScreenStr := Format('%d x %d pixels, %d-bit (%d Hz)', [WidthPx, HeightPx, BPP, RefreshRate])
+    else
+      ScreenStr := Format('%d x %d pixels, %d-bit', [WidthPx, HeightPx, BPP]);
+
+    AddRow(lvVideo, 'Graphics Adapter', GPUStr);
+    AddRow(lvVideo, 'Screen Resolution', Format('%d x %d pixels', [WidthPx, HeightPx]));
+    AddRow(lvVideo, 'Color Depth', Format('%d-bit', [BPP]));
+    if RefreshRate > 1 then
+      AddRow(lvVideo, 'Refresh Rate', Format('%d Hz', [RefreshRate]))
+    else
+      AddRow(lvVideo, 'Refresh Rate', 'Default / Hardware');
+
+    // ---------------- OVERVIEW TAB ----------------
+    AddRow(lvOverview, 'Operating System', ProductName + ' (' + ArchStr + ')');
+    AddRow(lvOverview, 'Processor (CPU)', CPUName);
+    AddRow(lvOverview, 'CPU Speed & Cores', ClockStr);
+    AddRow(lvOverview, 'Motherboard', MoboStr);
+    AddRow(lvOverview, 'BIOS', BiosStr);
+    AddRow(lvOverview, 'Physical Memory', MemSummaryStr);
+    AddRow(lvOverview, 'Video Adapter', GPUStr);
+    AddRow(lvOverview, 'Display Mode', ScreenStr);
+    AddRow(lvOverview, 'System Uptime', UptimeStr);
+
+    // Text report
+    FReportLines.Add('[WINDOWS]');
+    FReportLines.Add('   OS           : ' + ProductName);
+    FReportLines.Add('   Version      : ' + BuildStr + ' | ' + ArchStr);
+    FReportLines.Add('   Computer/User: ' + string(CompName) + ' / ' + string(UserName));
+    FReportLines.Add('   Uptime       : ' + UptimeStr);
+    FReportLines.Add('');
+    FReportLines.Add('[PROCESSOR & MOTHERBOARD]');
+    FReportLines.Add('   Model        : ' + CPUName + ' [' + Vendor + ']');
+    FReportLines.Add('   Signature    : ' + SigStr);
+    FReportLines.Add('   Clock/Cores  : ' + ClockStr);
+    FReportLines.Add('   Instructions : ' + FeatStr);
+    FReportLines.Add('   Motherboard  : ' + MoboStr);
+    FReportLines.Add('   BIOS         : ' + BiosStr);
+    FReportLines.Add('');
+    FReportLines.Add('[MEMORY]');
+    FReportLines.Add('   Physical RAM : ' + MemSummaryStr);
+    FReportLines.Add(Format('   Page File    : %d MB Total | %d MB Free', [TotalPageMB, AvailPageMB]));
+    FReportLines.Add('');
+    FReportLines.Add('[VIDEO]');
+    FReportLines.Add('   Adapter      : ' + GPUStr);
+    FReportLines.Add('   Display Mode : ' + ScreenStr);
+    FReportLines.Add('');
+    FReportLines.Add('[DISKS]');
+
+    // ---------------- 6. DISKS ----------------
+    OldErrMode := SetErrorMode(SEM_FAILCRITICALERRORS);
+    try
+      @GetDiskFreeSpaceExA := GetProcAddress(hKernel, 'GetDiskFreeSpaceExA');
+      DrivesMask := GetLogicalDrives;
+      for DriveLetter := 'A' to 'Z' do
+      begin
+        if (DrivesMask and (1 shl (Ord(DriveLetter) - Ord('A')))) <> 0 then
+        begin
+          RootPath := DriveLetter + ':';
+          DType := GetDriveTypeA(PAnsiChar(RootPath));
+          case DType of
+            DRIVE_REMOVABLE: TypeStr := 'Removable';
+            DRIVE_FIXED:     TypeStr := 'Fixed HDD/SSD';
+            DRIVE_REMOTE:    TypeStr := 'Network';
+            DRIVE_CDROM:     TypeStr := 'CD/DVD-ROM';
+            DRIVE_RAMDISK:   TypeStr := 'RAM Disk';
+          else
+            TypeStr := 'Unknown';
+          end;
+
+          FillChar(VolNameBuf, SizeOf(VolNameBuf), 0);
+          FillChar(FSNameBuf, SizeOf(FSNameBuf), 0);
+          VolLabel := '';
+          FSName := '';
+
+          if GetVolumeInformationA(PAnsiChar(RootPath), VolNameBuf, SizeOf(VolNameBuf),
+            @SerialNum, MaxCompLen, FSFlags, FSNameBuf, SizeOf(FSNameBuf)) then
+          begin
+            VolLabel := Trim(string(VolNameBuf));
+            FSName := Trim(string(FSNameBuf));
+          end;
+
+          TotalBytes := 0;
+          TotalFree := 0;
+          if Assigned(GetDiskFreeSpaceExA) then
+          begin
+            if not GetDiskFreeSpaceExA(PAnsiChar(RootPath), FreeAvail, TotalBytes, TotalFree) then
+            begin
+              TotalBytes := 0;
+              TotalFree := 0;
+            end;
+          end
+          else
+          begin
+            if GetDiskFreeSpaceA(PAnsiChar(RootPath), SecPerClus, BytesPerSec, FreeClus, TotalClus) then
+            begin
+              TotalBytes := Int64(TotalClus) * SecPerClus * BytesPerSec;
+              TotalFree := Int64(FreeClus) * SecPerClus * BytesPerSec;
+            end;
+          end;
+
+          if VolLabel = '' then VolLabel := 'No Label';
+          if FSName = '' then FSName := '-';
+
+          if TotalBytes > 0 then
+          begin
+            CapStr := Format('%d MB / %d MB free',
+              [TotalBytes div (1024 * 1024), TotalFree div (1024 * 1024)]);
+            UsedPct := Round(((TotalBytes - TotalFree) * 100.0) / TotalBytes);
+            if UsedPct < 0 then UsedPct := 0;
+            if UsedPct > 100 then UsedPct := 100;
+          end
+          else
+          begin
+            CapStr := 'Media not ready';
+            UsedPct := -1;
+          end;
+
+          Item := lvDisks.Items.Add;
+          Item.Caption := DriveLetter + ':';
+          Item.Data := Pointer(UsedPct);
+          Item.SubItems.Add(TypeStr);
+          Item.SubItems.Add(VolLabel);
+          Item.SubItems.Add(FSName);
+          Item.SubItems.Add(CapStr);
+          if UsedPct >= 0 then
+            Item.SubItems.Add(IntToStr(UsedPct) + '%')
+          else
+            Item.SubItems.Add('N/A');
+
+          FReportLines.Add(Format('   %s [%s] (%s, %s) - %s',
+            [DriveLetter + ':', TypeStr, VolLabel, FSName, CapStr]));
+        end;
+      end;
+    finally
+      SetErrorMode(OldErrMode);
+    end;
+
+    StatusBar1.Panels[0].Text := 'Scan complete | ' + ProductName;
   finally
-    Memo1.Lines.EndUpdate;
+    lvOverview.Items.EndUpdate;
+    lvWindows.Items.EndUpdate;
+    lvProcessor.Items.EndUpdate;
+    lvMemory.Items.EndUpdate;
+    lvVideo.Items.EndUpdate;
+    lvDisks.Items.EndUpdate;
   end;
 end;
 
 procedure TForm1.FormCreate(Sender: TObject);
 begin
-  CollectSystemInfo;
+  FReportLines := TStringList.Create;
+  CollectAllData;
+end;
+
+destructor TForm1.Destroy;
+begin
+  FReportLines.Free;
+  inherited;
 end;
 
 procedure TForm1.Button1Click(Sender: TObject);
 begin
   Button1.Enabled := False;
+  StatusBar1.Panels[0].Text := 'Refreshing hardware info...';
+  Application.ProcessMessages;
   try
-    CollectSystemInfo;
+    CollectAllData;
   finally
     Button1.Enabled := True;
   end;
@@ -935,8 +1150,8 @@ begin
     SaveDlg.FileName := 'SysInfo_Report.txt';
     if SaveDlg.Execute then
     begin
-      Memo1.Lines.SaveToFile(SaveDlg.FileName);
-      ShowMessage('Report saved successfully!');
+      FReportLines.SaveToFile(SaveDlg.FileName);
+      StatusBar1.Panels[0].Text := 'Report saved to ' + ExtractFileName(SaveDlg.FileName);
     end;
   finally
     SaveDlg.Free;
@@ -945,8 +1160,8 @@ end;
 
 procedure TForm1.Button3Click(Sender: TObject);
 begin
-  Clipboard.AsText := Memo1.Lines.Text;
-  ShowMessage('Report copied to clipboard!');
+  Clipboard.AsText := FReportLines.Text;
+  StatusBar1.Panels[0].Text := 'Report copied to clipboard!';
 end;
 
 end.
